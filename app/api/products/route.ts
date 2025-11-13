@@ -1,13 +1,16 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { notion, DB_PRODUCT_DATABASE } from "@/lib/notion";
+import { notion } from "@/lib/notion";
 
-// Explicitly mark this route as dynamic so Next/Vercel don't try to pre-render it
+// rota explicitamente dinâmica
 export const dynamic = "force-dynamic";
+
+// ID da Product Database direto no código, para teste
+const PRODUCT_DATABASE_ID = "1f33fd21592e80f18067000c42e7e655";
 
 export async function GET(request: NextRequest) {
   try {
-    if (!DB_PRODUCT_DATABASE) {
+    if (!PRODUCT_DATABASE_ID) {
       throw new Error("Product database ID is not configured");
     }
 
@@ -45,7 +48,7 @@ export async function GET(request: NextRequest) {
     }
 
     const response = await notion.databases.query({
-      database_id: DB_PRODUCT_DATABASE,
+      database_id: PRODUCT_DATABASE_ID,
       filter:
         filters.length === 1
           ? filters[0]
