@@ -1,15 +1,18 @@
 import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
 import { notion, DB_PRODUCT_DATABASE } from "@/lib/notion";
 
-export async function GET(request: Request) {
+// Explicitly mark this route as dynamic so Next/Vercel don't try to pre-render it
+export const dynamic = "force-dynamic";
+
+export async function GET(request: NextRequest) {
   try {
     if (!DB_PRODUCT_DATABASE) {
       throw new Error("Product database ID is not configured");
     }
 
-    const { searchParams } = new URL(request.url);
-    const sku = searchParams.get("sku");
-    const name = searchParams.get("name");
+    const sku = request.nextUrl.searchParams.get("sku");
+    const name = request.nextUrl.searchParams.get("name");
 
     if (!sku && !name) {
       return NextResponse.json(
@@ -56,13 +59,8 @@ export async function GET(request: Request) {
 
       return {
         id: page.id,
-        name:
-          props?.Name?.title?.[0]?.plain_text ??
-          null,
-        sku:
-          props?.SKU?.rich_text?.[0]?.plain_text ??
-          null,
-        // você pode ir enriquecendo depois com mais campos
+        name: props?.Name?.title?.[0]?.plain_text ?? null,
+        sku: props?.SKU?.rich_text?.[0]?.plain_text ?? null,
       };
     });
 
