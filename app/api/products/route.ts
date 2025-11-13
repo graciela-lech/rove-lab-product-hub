@@ -6,7 +6,7 @@ import { notion } from "@/lib/notion";
 export const dynamic = "force-dynamic";
 
 // ID da Product Database direto no código, para teste
-const PRODUCT_DATABASE_ID = "1f23fd21592e8110ad4afc99dc333da6";
+const PRODUCT_DATABASE_ID = "1f23fd21-592e-8110-ad4a-fc99dc333da6";
 
 export async function GET(request: NextRequest) {
   try {
