@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import type { NextRequest } from "next/server";
 import {
   notion,
   DB_PRODUCT_DATABASE,
@@ -7,159 +6,100 @@ import {
   DB_PRODUCT_POSITIONING,
 } from "@/lib/notion";
 
-export const dynamic = "force-dynamic";
-
-type NotionProperty = any;
-
-/**
- * Helpers para extrair valores das propriedades do Notion
- */
-function getTitle(props: NotionProperty, key: string): string | null {
-  const field = props?.[key];
-  if (!field || !Array.isArray(field.title) || field.title.length === 0) return null;
-  return field.title[0]?.plain_text ?? null;
+// -----------------------------
+// Helpers
+// -----------------------------
+function getTitle(props: any, key: string) {
+  return props?.[key]?.title?.[0]?.plain_text ?? null;
 }
 
-function getRichText(props: NotionProperty, key: string): string | null {
-  const field = props?.[key];
-  if (!field || !Array.isArray(field.rich_text) || field.rich_text.length === 0) return null;
-  return field.rich_text[0]?.plain_text ?? null;
+function getRichText(props: any, key: string) {
+  return props?.[key]?.rich_text?.[0]?.plain_text ?? null;
 }
 
-function getSelect(props: NotionProperty, key: string): string | null {
-  const field = props?.[key];
-  if (!field || !field.select) return null;
-  return field.select?.name ?? null;
+function getSelect(props: any, key: string) {
+  return props?.[key]?.select?.name ?? null;
 }
 
-function getMultiSelect(props: NotionProperty, key: string): string[] {
-  const field = props?.[key];
-  if (!field || !Array.isArray(field.multi_select)) return [];
-  return field.multi_select.map((opt: any) => opt?.name).filter(Boolean);
+function getMultiSelect(props: any, key: string) {
+  return props?.[key]?.multi_select?.map((x: any) => x.name) ?? [];
 }
 
-/**
- * Mapeia propriedades extras em um dicionário "attributes"
- */
-function extractAttributes(
-  props: NotionProperty,
-  ignoreKeys: string[] = []
-): Record<string, any> {
-  const attributes: Record<string, any> = {};
-  for (const key of Object.keys(props ?? {})) {
-    if (ignoreKeys.includes(key)) continue;
-    const prop = props[key];
-    if (!prop) continue;
+// Nome — pega de vários campos possíveis
+const POSSIBLE_NAME_FIELDS = [
+  "Name",
+  "Product Name",
+  "Variant Name",
+  "Product",
+  "Title",
+  "Produto",
+  "Item Name",
+];
 
-    try {
-      switch (prop.type) {
-        case "select":
-          attributes[key] = prop.select?.name ?? null;
-          break;
-        case "multi_select":
-          attributes[key] = (prop.multi_select ?? []).map((m: any) => m.name).filter(Boolean);
-          break;
-        case "rich_text":
-          attributes[key] = (prop.rich_text ?? [])
-            .map((r: any) => r.plain_text)
-            .filter(Boolean)
-            .join(" ");
-          break;
-        case "title":
-          attributes[key] = (prop.title ?? [])
-            .map((t: any) => t.plain_text)
-            .filter(Boolean)
-            .join(" ");
-          break;
-        case "checkbox":
-          attributes[key] = !!prop.checkbox;
-          break;
-        case "number":
-          attributes[key] = prop.number;
-          break;
-        case "url":
-          attributes[key] = prop.url;
-          break;
-        case "date":
-          attributes[key] = prop.date?.start ?? null;
-          break;
-        default:
-          break;
-      }
-    } catch {
-      continue;
-    }
+function getBestName(props: any) {
+  for (const field of POSSIBLE_NAME_FIELDS) {
+    const t = getTitle(props, field);
+    if (t) return t;
   }
-  return attributes;
+
+  const rt = getRichText(props, "Name");
+  if (rt) return rt;
+
+  return null;
 }
 
-export async function GET(request: NextRequest) {
+// -----------------------------
+// MAIN ROUTE
+// -----------------------------
+export async function GET(request: Request) {
   try {
     if (!DB_PRODUCT_DATABASE) {
-      throw new Error("Product database ID is not configured");
+      throw new Error("Product Database ID is not configured.");
     }
 
-    const url = request.nextUrl;
-    const sku = url.searchParams.get("sku");
-    const name = url.searchParams.get("name");
-    const limitParam = url.searchParams.get("limit");
-    const limit = limitParam
-      ? Math.min(Math.max(parseInt(limitParam, 10) || 10, 1), 100)
-      : 10;
+    const { searchParams } = new URL(request.url);
+    const sku = searchParams.get("sku");
 
-    if (!sku && !name) {
+    if (!sku) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "You must provide at least one query parameter: sku or name",
-        },
+        { ok: false, error: "Missing SKU parameter" },
         { status: 400 }
       );
     }
 
-    /**
-     * 1) Consulta principal na Product Database
-     */
-    const filters: any[] = [];
-
-    if (sku) {
-      filters.push({
-        property: "SKU", // AQUI sabemos que existe
-        rich_text: { equals: sku },
-      });
-    }
-
-    if (name) {
-      filters.push({
-        property: "Name",
-        title: { contains: name },
-      });
-    }
-
-    const mainFilter =
-      filters.length === 1
-        ? filters[0]
-        : {
-            and: filters,
-          };
-
+    // -------------------------------------
+    // 1) Buscar item principal no Product Database
+    // -------------------------------------
     const dbResponse = await notion.databases.query({
       database_id: DB_PRODUCT_DATABASE,
-      filter: mainFilter,
-      page_size: limit,
+      filter: {
+        property: "SKU",
+        rich_text: {
+          equals: sku,
+        },
+      },
     });
+
+    if (!dbResponse.results.length) {
+      return NextResponse.json({
+        ok: false,
+        count: 0,
+        items: [],
+      });
+    }
 
     const mainItems = dbResponse.results as any[];
 
-    /**
-     * 2) Para cada item, buscar complementos no Product Hub e Product Positioning
-     */
+    // -------------------------------------
+    // 2) Montar dados enriquecidos por item
+    // -------------------------------------
     const consolidated = await Promise.all(
       mainItems.map(async (page) => {
         const props = page.properties;
 
         const baseSku = getRichText(props, "SKU");
-        const baseName = getTitle(props, "Name");
+
+        const baseName = getBestName(props);
 
         const collection =
           getSelect(props, "Collection") ??
@@ -170,266 +110,115 @@ export async function GET(request: NextRequest) {
           getSelect(props, "Category") ??
           getSelect(props, "Product Category");
 
-        const productType =
-          getSelect(props, "Type") ??
-          getSelect(props, "Product Type") ??
-          getSelect(props, "Configuration");
+        const countries =
+          getMultiSelect(props, "Countries") ??
+          getMultiSelect(props, "Markets") ??
+          [];
 
-        const status =
-          getSelect(props, "Status") ??
-          getSelect(props, "Lifecycle Status");
+        // -----------------------------
+        // Buscar informações adicionais no Product Hub
+        // -----------------------------
+        let hubData = null;
 
-        const slug =
-          getRichText(props, "Slug") ??
-          getRichText(props, "Handle") ??
-          getRichText(props, "URL Handle");
+        if (DB_PRODUCT_HUB) {
+          const hubQuery = await notion.databases.query({
+            database_id: DB_PRODUCT_HUB,
+            filter: {
+              property: "SKU",
+              rich_text: { equals: baseSku },
+            },
+          });
 
-        const baseProduct: any = {
+          if (hubQuery.results.length) {
+            const hubProps = hubQuery.results[0].properties;
+
+            hubData = {
+              slug: getRichText(hubProps, "Slug"),
+              status: getSelect(hubProps, "Status"),
+              variants: getMultiSelect(hubProps, "Variants"),
+              attributes: {
+                color: getSelect(hubProps, "Color"),
+                fabric: getSelect(hubProps, "Fabric"),
+                material: getSelect(hubProps, "Material"),
+              },
+            };
+          }
+        }
+
+        // -----------------------------
+        // Buscar informações de Positioning
+        // -----------------------------
+        let positioningData = null;
+
+        if (DB_PRODUCT_POSITIONING) {
+          const posQuery = await notion.databases.query({
+            database_id: DB_PRODUCT_POSITIONING,
+            filter: {
+              property: "SKU",
+              rich_text: { equals: baseSku },
+            },
+          });
+
+          if (posQuery.results.length) {
+            const posProps = posQuery.results[0].properties;
+
+            positioningData = {
+              headline: getRichText(posProps, "Headline"),
+              subheadline: getRichText(posProps, "Subheadline"),
+              elevatorPitch: getRichText(posProps, "Elevator Pitch"),
+              keyBenefits: getMultiSelect(posProps, "Key Benefits"),
+              targetAudience: getRichText(posProps, "Target Audience"),
+              useCases: getMultiSelect(posProps, "Use Cases"),
+              toneOfVoice: getSelect(posProps, "Tone of Voice"),
+              differentiators: getMultiSelect(posProps, "Differentiators"),
+              objectionsAndAnswers: getMultiSelect(
+                posProps,
+                "Objections & Answers"
+              ),
+              proofPoints: getMultiSelect(posProps, "Proof Points"),
+            };
+          }
+        }
+
+        // -----------------------------
+        // Retorno final do item
+        // -----------------------------
+        return {
           id: page.id,
           sku: baseSku,
           name: baseName,
-          slug: slug,
-          status: status,
-          collection: collection,
-          category: category,
-          productType: productType,
-          countries: [] as any[],
-          variants: [] as any[],
-          attributes: {} as Record<string, any>,
-          positioning: {
-            headline: null as string | null,
-            subheadline: null as string | null,
-            elevatorPitch: null as string | null,
-            keyBenefits: [] as string[],
-            targetAudience: null as string | null,
-            useCases: [] as string[],
-            toneOfVoice: null as string | null,
-            differentiators: [] as string[],
-            objectionsAndAnswers: [] as string[],
-            proofPoints: [] as string[],
+          collection,
+          category,
+          countries,
+          variants: hubData?.variants ?? [],
+          slug: hubData?.slug ?? null,
+          status: hubData?.status ?? null,
+          attributes: hubData?.attributes ?? {},
+          positioning: positioningData ?? {
+            headline: null,
+            subheadline: null,
+            elevatorPitch: null,
+            keyBenefits: [],
+            targetAudience: null,
+            useCases: [],
+            toneOfVoice: null,
+            differentiators: [],
+            objectionsAndAnswers: [],
+            proofPoints: [],
           },
         };
-
-        /**
-         * 2a) Product Hub (protegido com try/catch)
-         */
-        let hubData: any = null;
-        if (DB_PRODUCT_HUB) {
-          try {
-            const hubFilters: any[] = [];
-
-            // ATENÇÃO: se a Product Hub não tiver coluna "SKU", este filtro causaria erro.
-            // Podemos comentar as próximas 4 linhas se isso acontecer.
-            if (baseSku) {
-              hubFilters.push({
-                property: "SKU",
-                rich_text: { equals: baseSku },
-              });
-            }
-
-            if (baseName) {
-              hubFilters.push({
-                property: "Name",
-                title: { contains: baseName },
-              });
-            }
-
-            if (hubFilters.length > 0) {
-              const hubResponse = await notion.databases.query({
-                database_id: DB_PRODUCT_HUB,
-                filter:
-                  hubFilters.length === 1
-                    ? hubFilters[0]
-                    : { or: hubFilters },
-                page_size: 1,
-              });
-
-              hubData = hubResponse.results?.[0] ?? null;
-            }
-          } catch (err) {
-            console.error("[product-full] Product Hub query error", err);
-            // segue sem quebrar a API
-          }
-        }
-
-        if (hubData) {
-          const hubProps = hubData.properties;
-
-          const markets =
-            getMultiSelect(hubProps, "Markets") ||
-            getMultiSelect(hubProps, "Countries") ||
-            getMultiSelect(hubProps, "Stores");
-
-          if (markets.length > 0) {
-            baseProduct.countries = markets.map((m) => ({
-              countryCode: m,
-              active: true,
-              notes: null,
-            }));
-          }
-
-          const hubAttributes = extractAttributes(hubProps, [
-            "Name",
-            "SKU",
-            "Markets",
-            "Countries",
-            "Stores",
-          ]);
-
-          baseProduct.attributes = {
-            ...baseProduct.attributes,
-            ...hubAttributes,
-          };
-        }
-
-        /**
-         * 2b) Product Positioning (também protegido com try/catch)
-         */
-        if (DB_PRODUCT_POSITIONING) {
-          try {
-            const posFilters: any[] = [];
-
-            // Se Product Positioning não tiver "SKU", podemos comentar este bloco.
-            if (baseSku) {
-              posFilters.push({
-                property: "SKU",
-                rich_text: { equals: baseSku },
-              });
-            }
-
-            // Ajuste "Product Name" para o nome exato da coluna de título, se for diferente
-            if (baseName) {
-              posFilters.push({
-                property: "Product Name",
-                title: { contains: baseName },
-              });
-            }
-
-            if (posFilters.length > 0) {
-              const posResponse = await notion.databases.query({
-                database_id: DB_PRODUCT_POSITIONING,
-                filter:
-                  posFilters.length === 1
-                    ? posFilters[0]
-                    : { or: posFilters },
-                page_size: 1,
-              });
-
-              const posData: any = posResponse.results?.[0] ?? null;
-
-              if (posData) {
-                const posProps = posData.properties;
-
-                baseProduct.positioning.headline =
-                  getTitle(posProps, "Headline") ??
-                  getRichText(posProps, "Headline");
-
-                baseProduct.positioning.subheadline =
-                  getRichText(posProps, "Subheadline") ??
-                  getRichText(posProps, "Subheadline / Intro");
-
-                baseProduct.positioning.elevatorPitch =
-                  getRichText(posProps, "Elevator Pitch") ??
-                  getRichText(posProps, "Pitch");
-
-                const benefits = getMultiSelect(posProps, "Key Benefits");
-                const useCases = getMultiSelect(posProps, "Use Cases");
-                const differentiators = getMultiSelect(
-                  posProps,
-                  "Differentiators"
-                );
-                const proofPoints = getMultiSelect(
-                  posProps,
-                  "Proof Points"
-                );
-
-                if (benefits.length > 0) {
-                  baseProduct.positioning.keyBenefits = benefits;
-                }
-                if (useCases.length > 0) {
-                  baseProduct.positioning.useCases = useCases;
-                }
-                if (differentiators.length > 0) {
-                  baseProduct.positioning.differentiators = differentiators;
-                }
-                if (proofPoints.length > 0) {
-                  baseProduct.positioning.proofPoints = proofPoints;
-                }
-
-                const targetAudienceText =
-                  getRichText(posProps, "Target Audience") ??
-                  getRichText(posProps, "Audience");
-
-                if (targetAudienceText) {
-                  baseProduct.positioning.targetAudience = targetAudienceText;
-                }
-
-                const tone = getRichText(posProps, "Tone of Voice");
-                if (tone) {
-                  baseProduct.positioning.toneOfVoice = tone;
-                }
-
-                const objections =
-                  getRichText(posProps, "Objections & Answers") ??
-                  getRichText(
-                    posProps,
-                    "Objections and Answers"
-                  );
-
-                if (objections) {
-                  baseProduct.positioning.objectionsAndAnswers = [objections];
-                }
-
-                const posAttributes = extractAttributes(posProps, [
-                  "SKU",
-                  "Product Name",
-                  "Headline",
-                  "Subheadline",
-                  "Subheadline / Intro",
-                  "Elevator Pitch",
-                  "Pitch",
-                  "Key Benefits",
-                  "Use Cases",
-                  "Differentiators",
-                  "Proof Points",
-                  "Target Audience",
-                  "Audience",
-                  "Tone of Voice",
-                  "Objections & Answers",
-                  "Objections and Answers",
-                ]);
-
-                baseProduct.attributes = {
-                  ...baseProduct.attributes,
-                  ...posAttributes,
-                };
-              }
-            }
-          } catch (err) {
-            console.error("[product-full] Positioning query error", err);
-            // continua sem derrubar a resposta
-          }
-        }
-
-        return baseProduct;
       })
     );
 
-    return NextResponse.json(
-      {
-        ok: true,
-        count: consolidated.length,
-        items: consolidated,
-      },
-      { status: 200 }
-    );
+    return NextResponse.json({
+      ok: true,
+      count: consolidated.length,
+      items: consolidated,
+    });
   } catch (error: any) {
-    console.error("[product-full] Error", error);
+    console.error(error);
     return NextResponse.json(
-      {
-        ok: false,
-        error: error?.message ?? "Unknown error",
-      },
+      { ok: false, error: error?.message ?? "Unknown error" },
       { status: 500 }
     );
   }
