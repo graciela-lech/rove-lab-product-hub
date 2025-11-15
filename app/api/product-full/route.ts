@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
 import {
   notion,
   DB_PRODUCT_DATABASE,
@@ -6,8 +7,11 @@ import {
   DB_PRODUCT_POSITIONING,
 } from "@/lib/notion";
 
+// Garante que a rota é sempre dinâmica (evita erro de build)
+export const dynamic = "force-dynamic";
+
 // -----------------------------
-// Helpers
+// Helpers básicos
 // -----------------------------
 function getTitle(props: any, key: string) {
   return props?.[key]?.title?.[0]?.plain_text ?? null;
@@ -25,7 +29,7 @@ function getMultiSelect(props: any, key: string) {
   return props?.[key]?.multi_select?.map((x: any) => x.name) ?? [];
 }
 
-// Nome — pega de vários campos possíveis
+// Lista de possíveis campos que podem ter o nome do produto
 const POSSIBLE_NAME_FIELDS = [
   "Name",
   "Product Name",
@@ -49,16 +53,16 @@ function getBestName(props: any) {
 }
 
 // -----------------------------
-// MAIN ROUTE
+// Rota principal
 // -----------------------------
-export async function GET(request: Request) {
+export async function GET(request: NextRequest) {
   try {
     if (!DB_PRODUCT_DATABASE) {
       throw new Error("Product Database ID is not configured.");
     }
 
-    const { searchParams } = new URL(request.url);
-    const sku = searchParams.get("sku");
+    const url = request.nextUrl;
+    const sku = url.searchParams.get("sku");
 
     if (!sku) {
       return NextResponse.json(
@@ -82,7 +86,7 @@ export async function GET(request: Request) {
 
     if (!dbResponse.results.length) {
       return NextResponse.json({
-        ok: false,
+        ok: true,
         count: 0,
         items: [],
       });
@@ -98,7 +102,6 @@ export async function GET(request: Request) {
         const props = page.properties;
 
         const baseSku = getRichText(props, "SKU");
-
         const baseName = getBestName(props);
 
         const collection =
@@ -116,67 +119,138 @@ export async function GET(request: Request) {
           [];
 
         // -----------------------------
-        // Buscar informações adicionais no Product Hub
+        // 2a) Informações adicionais no Product Hub (com try/catch)
         // -----------------------------
-        let hubData = null;
+        let hubData: {
+          slug: string | null;
+          status: string | null;
+          variants: string[];
+          attributes: Record<string, any>;
+        } | null = null;
 
         if (DB_PRODUCT_HUB) {
-          const hubQuery = await notion.databases.query({
-            database_id: DB_PRODUCT_HUB,
-            filter: {
-              property: "SKU",
-              rich_text: { equals: baseSku },
-            },
-          });
-
-          if (hubQuery.results.length) {
-            const hubProps = hubQuery.results[0].properties;
-
-            hubData = {
-              slug: getRichText(hubProps, "Slug"),
-              status: getSelect(hubProps, "Status"),
-              variants: getMultiSelect(hubProps, "Variants"),
-              attributes: {
-                color: getSelect(hubProps, "Color"),
-                fabric: getSelect(hubProps, "Fabric"),
-                material: getSelect(hubProps, "Material"),
+          try {
+            const hubQuery = await notion.databases.query({
+              database_id: DB_PRODUCT_HUB,
+              filter: {
+                property: "SKU", // se não existir, cairá no catch
+                rich_text: { equals: baseSku },
               },
-            };
+            });
+
+            if (hubQuery.results.length) {
+              const hubProps = (hubQuery.results[0] as any).properties;
+
+              hubData = {
+                slug:
+                  getRichText(hubProps, "Slug") ??
+                  getRichText(hubProps, "Handle") ??
+                  null,
+                status:
+                  getSelect(hubProps, "Status") ??
+                  getSelect(hubProps, "Lifecycle Status") ??
+                  null,
+                variants:
+                  getMultiSelect(hubProps, "Variants") ??
+                  getMultiSelect(hubProps, "Configurations") ??
+                  [],
+                attributes: {
+                  color:
+                    getSelect(hubProps, "Color") ??
+                    getSelect(hubProps, "Color Family") ??
+                    null,
+                  fabric:
+                    getSelect(hubProps, "Fabric") ??
+                    getSelect(hubProps, "Fabric Family") ??
+                    null,
+                  material:
+                    getSelect(hubProps, "Material") ??
+                    getSelect(hubProps, "Material Family") ??
+                    null,
+                },
+              };
+            }
+          } catch (err) {
+            console.error("[product-full] Product Hub query error", err);
+            // segue sem quebrar a API
           }
         }
 
         // -----------------------------
-        // Buscar informações de Positioning
+        // 2b) Informações de Product Positioning (também com try/catch)
         // -----------------------------
-        let positioningData = null;
+        let positioningData:
+          | {
+              headline: string | null;
+              subheadline: string | null;
+              elevatorPitch: string | null;
+              keyBenefits: string[];
+              targetAudience: string | null;
+              useCases: string[];
+              toneOfVoice: string | null;
+              differentiators: string[];
+              objectionsAndAnswers: string[];
+              proofPoints: string[];
+            }
+          | null = null;
 
         if (DB_PRODUCT_POSITIONING) {
-          const posQuery = await notion.databases.query({
-            database_id: DB_PRODUCT_POSITIONING,
-            filter: {
-              property: "SKU",
-              rich_text: { equals: baseSku },
-            },
-          });
+          try {
+            const posQuery = await notion.databases.query({
+              database_id: DB_PRODUCT_POSITIONING,
+              filter: {
+                property: "SKU", // idem: se não existir, cai no catch
+                rich_text: { equals: baseSku },
+              },
+            });
 
-          if (posQuery.results.length) {
-            const posProps = posQuery.results[0].properties;
+            if (posQuery.results.length) {
+              const posProps = (posQuery.results[0] as any).properties;
 
-            positioningData = {
-              headline: getRichText(posProps, "Headline"),
-              subheadline: getRichText(posProps, "Subheadline"),
-              elevatorPitch: getRichText(posProps, "Elevator Pitch"),
-              keyBenefits: getMultiSelect(posProps, "Key Benefits"),
-              targetAudience: getRichText(posProps, "Target Audience"),
-              useCases: getMultiSelect(posProps, "Use Cases"),
-              toneOfVoice: getSelect(posProps, "Tone of Voice"),
-              differentiators: getMultiSelect(posProps, "Differentiators"),
-              objectionsAndAnswers: getMultiSelect(
-                posProps,
-                "Objections & Answers"
-              ),
-              proofPoints: getMultiSelect(posProps, "Proof Points"),
-            };
+              positioningData = {
+                headline:
+                  getRichText(posProps, "Headline") ??
+                  getTitle(posProps, "Headline") ??
+                  null,
+                subheadline:
+                  getRichText(posProps, "Subheadline") ??
+                  getRichText(posProps, "Subheadline / Intro") ??
+                  null,
+                elevatorPitch:
+                  getRichText(posProps, "Elevator Pitch") ??
+                  getRichText(posProps, "Pitch") ??
+                  null,
+                keyBenefits:
+                  getMultiSelect(posProps, "Key Benefits") ?? [],
+                targetAudience:
+                  getRichText(posProps, "Target Audience") ??
+                  getRichText(posProps, "Audience") ??
+                  null,
+                useCases: getMultiSelect(posProps, "Use Cases") ?? [],
+                toneOfVoice:
+                  getSelect(posProps, "Tone of Voice") ?? null,
+                differentiators:
+                  getMultiSelect(posProps, "Differentiators") ?? [],
+                objectionsAndAnswers:
+                  getMultiSelect(
+                    posProps,
+                    "Objections & Answers"
+                  ) ??
+                  getMultiSelect(
+                    posProps,
+                    "Objections and Answers"
+                  ) ??
+                  [],
+                proofPoints:
+                  getMultiSelect(posProps, "Proof Points") ?? [],
+              };
+            }
+          } catch (err) {
+            console.error(
+              "[product-full] Product Positioning query error",
+              err
+            );
+            // não derruba a resposta
           }
         }
 
@@ -194,18 +268,19 @@ export async function GET(request: Request) {
           slug: hubData?.slug ?? null,
           status: hubData?.status ?? null,
           attributes: hubData?.attributes ?? {},
-          positioning: positioningData ?? {
-            headline: null,
-            subheadline: null,
-            elevatorPitch: null,
-            keyBenefits: [],
-            targetAudience: null,
-            useCases: [],
-            toneOfVoice: null,
-            differentiators: [],
-            objectionsAndAnswers: [],
-            proofPoints: [],
-          },
+          positioning:
+            positioningData ?? {
+              headline: null,
+              subheadline: null,
+              elevatorPitch: null,
+              keyBenefits: [],
+              targetAudience: null,
+              useCases: [],
+              toneOfVoice: null,
+              differentiators: [],
+              objectionsAndAnswers: [],
+              proofPoints: [],
+            },
         };
       })
     );
@@ -216,7 +291,7 @@ export async function GET(request: Request) {
       items: consolidated,
     });
   } catch (error: any) {
-    console.error(error);
+    console.error("[product-full] Error", error);
     return NextResponse.json(
       { ok: false, error: error?.message ?? "Unknown error" },
       { status: 500 }
