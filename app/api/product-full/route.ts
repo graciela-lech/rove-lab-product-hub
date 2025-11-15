@@ -7,10 +7,8 @@ import {
   DB_PRODUCT_POSITIONING,
 } from "@/lib/notion";
 
-// Garante que a rota é sempre dinâmica (não estática)
 export const dynamic = "force-dynamic";
 
-// Tipagem frouxa pra não travar o build caso algo mude no Notion
 type NotionProperty = any;
 
 /**
@@ -41,8 +39,7 @@ function getMultiSelect(props: NotionProperty, key: string): string[] {
 }
 
 /**
- * Mapeia propriedades extras genéricas para um dicionário "attributes"
- * Ignora chaves que já estão sendo tratadas diretamente.
+ * Mapeia propriedades extras em um dicionário "attributes"
  */
 function extractAttributes(
   props: NotionProperty,
@@ -87,11 +84,9 @@ function extractAttributes(
           attributes[key] = prop.date?.start ?? null;
           break;
         default:
-          // Ignora tipos mais complexos (relation, rollup, etc.) por enquanto
           break;
       }
     } catch {
-      // Se der qualquer erro ao extrair, simplesmente ignora a chave
       continue;
     }
   }
@@ -129,7 +124,7 @@ export async function GET(request: NextRequest) {
 
     if (sku) {
       filters.push({
-        property: "SKU",
+        property: "SKU", // AQUI sabemos que existe
         rich_text: { equals: sku },
       });
     }
@@ -216,43 +211,50 @@ export async function GET(request: NextRequest) {
         };
 
         /**
-         * 2a) Product Hub
+         * 2a) Product Hub (protegido com try/catch)
          */
         let hubData: any = null;
         if (DB_PRODUCT_HUB) {
-          const hubFilters: any[] = [];
+          try {
+            const hubFilters: any[] = [];
 
-          if (baseSku) {
-            hubFilters.push({
-              property: "SKU",
-              rich_text: { equals: baseSku },
-            });
-          }
-          if (baseName) {
-            hubFilters.push({
-              property: "Name",
-              title: { contains: baseName },
-            });
-          }
+            // ATENÇÃO: se a Product Hub não tiver coluna "SKU", este filtro causaria erro.
+            // Podemos comentar as próximas 4 linhas se isso acontecer.
+            if (baseSku) {
+              hubFilters.push({
+                property: "SKU",
+                rich_text: { equals: baseSku },
+              });
+            }
 
-          if (hubFilters.length > 0) {
-            const hubResponse = await notion.databases.query({
-              database_id: DB_PRODUCT_HUB,
-              filter:
-                hubFilters.length === 1
-                  ? hubFilters[0]
-                  : { or: hubFilters },
-              page_size: 1,
-            });
+            if (baseName) {
+              hubFilters.push({
+                property: "Name",
+                title: { contains: baseName },
+              });
+            }
 
-            hubData = hubResponse.results?.[0] ?? null;
+            if (hubFilters.length > 0) {
+              const hubResponse = await notion.databases.query({
+                database_id: DB_PRODUCT_HUB,
+                filter:
+                  hubFilters.length === 1
+                    ? hubFilters[0]
+                    : { or: hubFilters },
+                page_size: 1,
+              });
+
+              hubData = hubResponse.results?.[0] ?? null;
+            }
+          } catch (err) {
+            console.error("[product-full] Product Hub query error", err);
+            // segue sem quebrar a API
           }
         }
 
         if (hubData) {
           const hubProps = hubData.properties;
 
-          // Exemplo de markets / countries – ajuste o nome se sua coluna tiver outro nome
           const markets =
             getMultiSelect(hubProps, "Markets") ||
             getMultiSelect(hubProps, "Countries") ||
@@ -266,7 +268,6 @@ export async function GET(request: NextRequest) {
             }));
           }
 
-          // Por enquanto, não mapeamos variants explicitamente; isso pode ser refinado depois
           const hubAttributes = extractAttributes(hubProps, [
             "Name",
             "SKU",
@@ -282,117 +283,131 @@ export async function GET(request: NextRequest) {
         }
 
         /**
-         * 2b) Product Positioning
+         * 2b) Product Positioning (também protegido com try/catch)
          */
         if (DB_PRODUCT_POSITIONING) {
-          const posFilters: any[] = [];
+          try {
+            const posFilters: any[] = [];
 
-          if (baseSku) {
-            posFilters.push({
-              property: "SKU",
-              rich_text: { equals: baseSku },
-            });
-          }
-          if (baseName) {
-            posFilters.push({
-              property: "Product Name",
-              title: { contains: baseName },
-            });
-          }
-
-          if (posFilters.length > 0) {
-            const posResponse = await notion.databases.query({
-              database_id: DB_PRODUCT_POSITIONING,
-              filter:
-                posFilters.length === 1
-                  ? posFilters[0]
-                  : { or: posFilters },
-              page_size: 1,
-            });
-
-            const posData: any = posResponse.results?.[0] ?? null;
-
-            if (posData) {
-              const posProps = posData.properties;
-
-              baseProduct.positioning.headline =
-                getTitle(posProps, "Headline") ??
-                getRichText(posProps, "Headline");
-
-              baseProduct.positioning.subheadline =
-                getRichText(posProps, "Subheadline") ??
-                getRichText(posProps, "Subheadline / Intro");
-
-              baseProduct.positioning.elevatorPitch =
-                getRichText(posProps, "Elevator Pitch") ??
-                getRichText(posProps, "Pitch");
-
-              const benefits = getMultiSelect(posProps, "Key Benefits");
-              const useCases = getMultiSelect(posProps, "Use Cases");
-              const differentiators = getMultiSelect(
-                posProps,
-                "Differentiators"
-              );
-              const proofPoints = getMultiSelect(posProps, "Proof Points");
-
-              if (benefits.length > 0) {
-                baseProduct.positioning.keyBenefits = benefits;
-              }
-              if (useCases.length > 0) {
-                baseProduct.positioning.useCases = useCases;
-              }
-              if (differentiators.length > 0) {
-                baseProduct.positioning.differentiators = differentiators;
-              }
-              if (proofPoints.length > 0) {
-                baseProduct.positioning.proofPoints = proofPoints;
-              }
-
-              const targetAudienceText =
-                getRichText(posProps, "Target Audience") ??
-                getRichText(posProps, "Audience");
-
-              if (targetAudienceText) {
-                baseProduct.positioning.targetAudience = targetAudienceText;
-              }
-
-              const tone = getRichText(posProps, "Tone of Voice");
-              if (tone) {
-                baseProduct.positioning.toneOfVoice = tone;
-              }
-
-              const objections =
-                getRichText(posProps, "Objections & Answers") ??
-                getRichText(posProps, "Objections and Answers");
-
-              if (objections) {
-                baseProduct.positioning.objectionsAndAnswers = [objections];
-              }
-
-              const posAttributes = extractAttributes(posProps, [
-                "SKU",
-                "Product Name",
-                "Headline",
-                "Subheadline",
-                "Subheadline / Intro",
-                "Elevator Pitch",
-                "Pitch",
-                "Key Benefits",
-                "Use Cases",
-                "Differentiators",
-                "Proof Points",
-                "Target Audience",
-                "Audience",
-                "Tone of Voice",
-                "Objections & Answers",
-                "Objections and Answers",
-              ]);
-
-              baseProduct.attributes = {
-                ...baseProduct.attributes,
-                ...posAttributes,
-              };
+            // Se Product Positioning não tiver "SKU", podemos comentar este bloco.
+            if (baseSku) {
+              posFilters.push({
+                property: "SKU",
+                rich_text: { equals: baseSku },
+              });
             }
+
+            // Ajuste "Product Name" para o nome exato da coluna de título, se for diferente
+            if (baseName) {
+              posFilters.push({
+                property: "Product Name",
+                title: { contains: baseName },
+              });
+            }
+
+            if (posFilters.length > 0) {
+              const posResponse = await notion.databases.query({
+                database_id: DB_PRODUCT_POSITIONING,
+                filter:
+                  posFilters.length === 1
+                    ? posFilters[0]
+                    : { or: posFilters },
+                page_size: 1,
+              });
+
+              const posData: any = posResponse.results?.[0] ?? null;
+
+              if (posData) {
+                const posProps = posData.properties;
+
+                baseProduct.positioning.headline =
+                  getTitle(posProps, "Headline") ??
+                  getRichText(posProps, "Headline");
+
+                baseProduct.positioning.subheadline =
+                  getRichText(posProps, "Subheadline") ??
+                  getRichText(posProps, "Subheadline / Intro");
+
+                baseProduct.positioning.elevatorPitch =
+                  getRichText(posProps, "Elevator Pitch") ??
+                  getRichText(posProps, "Pitch");
+
+                const benefits = getMultiSelect(posProps, "Key Benefits");
+                const useCases = getMultiSelect(posProps, "Use Cases");
+                const differentiators = getMultiSelect(
+                  posProps,
+                  "Differentiators"
+                );
+                const proofPoints = getMultiSelect(
+                  posProps,
+                  "Proof Points"
+                );
+
+                if (benefits.length > 0) {
+                  baseProduct.positioning.keyBenefits = benefits;
+                }
+                if (useCases.length > 0) {
+                  baseProduct.positioning.useCases = useCases;
+                }
+                if (differentiators.length > 0) {
+                  baseProduct.positioning.differentiators = differentiators;
+                }
+                if (proofPoints.length > 0) {
+                  baseProduct.positioning.proofPoints = proofPoints;
+                }
+
+                const targetAudienceText =
+                  getRichText(posProps, "Target Audience") ??
+                  getRichText(posProps, "Audience");
+
+                if (targetAudienceText) {
+                  baseProduct.positioning.targetAudience = targetAudienceText;
+                }
+
+                const tone = getRichText(posProps, "Tone of Voice");
+                if (tone) {
+                  baseProduct.positioning.toneOfVoice = tone;
+                }
+
+                const objections =
+                  getRichText(posProps, "Objections & Answers") ??
+                  getRichText(
+                    posProps,
+                    "Objections and Answers"
+                  );
+
+                if (objections) {
+                  baseProduct.positioning.objectionsAndAnswers = [objections];
+                }
+
+                const posAttributes = extractAttributes(posProps, [
+                  "SKU",
+                  "Product Name",
+                  "Headline",
+                  "Subheadline",
+                  "Subheadline / Intro",
+                  "Elevator Pitch",
+                  "Pitch",
+                  "Key Benefits",
+                  "Use Cases",
+                  "Differentiators",
+                  "Proof Points",
+                  "Target Audience",
+                  "Audience",
+                  "Tone of Voice",
+                  "Objections & Answers",
+                  "Objections and Answers",
+                ]);
+
+                baseProduct.attributes = {
+                  ...baseProduct.attributes,
+                  ...posAttributes,
+                };
+              }
+            }
+          } catch (err) {
+            console.error("[product-full] Positioning query error", err);
+            // continua sem derrubar a resposta
           }
         }
 
