@@ -15,6 +15,22 @@ export async function GET(request: Request) {
       throw new Error("Product Database ID is not configured");
     }
 
+    // 1) Discover the title property of Product Database
+    const db = await notion.databases.retrieve({
+      database_id: DB_PRODUCT_DATABASE,
+    });
+
+    const titlePropKey = Object.keys(db.properties).find((key) => {
+      // @ts-ignore – Notion types are dynamic
+      return db.properties[key]?.type === "title";
+    });
+
+    if (!titlePropKey) {
+      throw new Error(
+        "Could not find a title property in Product Database. Please check the schema."
+      );
+    }
+
     const { searchParams } = new URL(request.url);
     const name = searchParams.get("name");
     const sku = searchParams.get("sku");
@@ -31,7 +47,7 @@ export async function GET(request: Request) {
 
     const filters: any[] = [];
 
-    // SKU search
+    // 2) Optional SKU filter
     if (sku) {
       filters.push({
         property: "SKU",
@@ -41,33 +57,17 @@ export async function GET(request: Request) {
       });
     }
 
-    // Name search (multi-field)
+    // 3) Name filter using the REAL title property of the DB
     if (name) {
       filters.push({
-        or: [
-          {
-            property: "Name",
-            title: {
-              contains: name,
-            },
-          },
-          {
-            property: "Product Name",
-            title: {
-              contains: name,
-            },
-          },
-          {
-            property: "Variant Name",
-            title: {
-              contains: name,
-            },
-          },
-        ],
+        property: titlePropKey,
+        title: {
+          contains: name,
+        },
       });
     }
 
-    // Execute query
+    // 4) Run query on Product Database
     const queryResponse = await notion.databases.query({
       database_id: DB_PRODUCT_DATABASE,
       filter:
@@ -83,14 +83,12 @@ export async function GET(request: Request) {
     const items = results.map((page) => {
       const props = page.properties;
 
+      const nameFromTitle = getTitle(props, titlePropKey);
+
       return {
         id: page.id,
         sku: getRichText(props, "SKU"),
-        name:
-          getTitle(props, "Name") ??
-          getTitle(props, "Product Name") ??
-          getTitle(props, "Variant Name") ??
-          null,
+        name: nameFromTitle,
       };
     });
 
@@ -100,7 +98,7 @@ export async function GET(request: Request) {
       items,
     });
   } catch (error: any) {
-    console.error("❌ Error in /product-search:", error);
+    console.error("❌ Error in /api/product-search:", error);
 
     return NextResponse.json(
       {
